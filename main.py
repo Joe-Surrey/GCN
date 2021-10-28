@@ -19,9 +19,8 @@ from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from torch.optim.lr_scheduler import MultiStepLR
 import apex
-
+import wandb
 from utils import count_params, import_class
-
 
 
 def init_seed(seed):
@@ -34,7 +33,11 @@ def init_seed(seed):
 def get_parser():
     # parameter priority: command line > config file > default
     parser = argparse.ArgumentParser(description='MS-G3D')
-
+    parser.add_argument(
+        '--name',
+        type=str,
+        default=None,
+        help='The name of the run')
     parser.add_argument(
         '--work-dir',
         type=str,
@@ -216,6 +219,71 @@ def get_parser():
 
     return parser
 
+import torch
+import re
+from torch._six import container_abcs, string_classes, int_classes
+default_collate_err_msg_format = (
+    "default_collate: batch must contain tensors, numpy arrays, numbers, "
+    "dicts or lists; found {}")
+np_str_obj_array_pattern = re.compile(r'[SaUO]')
+def custom_collate(batch):
+    r"""Puts each data field into a tensor with outer dimension batch size"""
+
+    elem = batch[0]
+    elem_type = type(elem)
+    if isinstance(elem, torch.Tensor):
+        out = None
+        if torch.utils.data.get_worker_info() is not None:
+            # If we're in a background process, concatenate directly into a
+            # shared memory tensor to avoid an extra copy
+            numel = sum([x.numel() for x in batch])
+            storage = elem.storage()._new_shared(numel)
+            out = elem.new(storage)
+        try:
+            return torch.stack(batch, 0, out=out)
+        except RuntimeError as E:
+            #print(type(batch[0]), type(batch[0][0]), type(batch[0][1]), type(batch[0][2]))
+            batch = [data.to(dtype=torch.float32) for data in batch]
+            elem = batch[0]
+            numel = sum([x.numel() for x in batch])
+            storage = elem.storage()._new_shared(numel)
+            out = elem.new(storage)
+
+            return torch.stack(batch, 0, out=out)
+            #print(E)
+            #print(len(batch))
+            #for data, target, index in batch:
+            #    print(data.dtype, data.shape, type(index))
+            #print()
+            #input()
+    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
+            and elem_type.__name__ != 'string_':
+        elem = batch[0]
+        if elem_type.__name__ == 'ndarray':
+            # array of string classes and object
+            if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
+                raise TypeError(default_collate_err_msg_format.format(elem.dtype))
+
+            return custom_collate([torch.as_tensor(b) for b in batch])
+        elif elem.shape == ():  # scalars
+            return torch.as_tensor(batch)
+    elif isinstance(elem, float):
+        return torch.tensor(batch, dtype=torch.float32)
+    elif isinstance(elem, int_classes):
+        return torch.tensor(batch)
+    elif isinstance(elem, string_classes):
+        return batch
+    elif isinstance(elem, container_abcs.Mapping):
+        return {key: custom_collate([d[key] for d in batch]) for key in elem}
+    elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
+        return elem_type(*(custom_collate(samples) for samples in zip(*batch)))
+    elif isinstance(elem, container_abcs.Sequence):
+        transposed = zip(*batch)
+        return [custom_collate(samples) for samples in transposed]
+
+    raise TypeError(default_collate_err_msg_format.format(elem_type))
+
+
 
 class Processor():
     """Processor for Skeleton-based Action Recgnition"""
@@ -278,23 +346,43 @@ class Processor():
                     output_device=self.output_device
                 )
 
+        if self.arg.phase == "train":
+            try:
+                wandb.login(key="fc3d61c9f18bec49e0cbbdf83f59c17e78bdada1")
+            except:
+                pass
+            wandb.init(project='ms-g3d', entity='joedinnsurey', config=arg)
+            if arg.name is not None:
+                wandb.run.name = f"{arg.name}-{str(time.time())}" # Time included in case of duplicates
+                wandb.run.save()
+            #wandb.watch(self.model)
+            config = wandb.config
+
     def load_model(self):
         output_device = self.arg.device[0] if type(
             self.arg.device) is list else self.arg.device
         self.output_device = output_device
-        Model = import_class(self.arg.model)
+        self.print_log(f"Importing Model")
 
+        Model = import_class(self.arg.model)
+        self.print_log(f"Imported Model: {str(Model) }")
         # Copy model file and main
         shutil.copy2(inspect.getfile(Model), self.arg.work_dir)
         shutil.copy2(os.path.join('.', __file__), self.arg.work_dir)
-
+        self.print_log(f"Building Model: {str(Model)}")
         self.model = Model(**self.arg.model_args).cuda(output_device)
-        self.loss = nn.CrossEntropyLoss().cuda(output_device)
+        loss = self.arg.get("loss", None)
+        if loss is None:
+            self.loss = nn.CrossEntropyLoss().cuda(output_device)
+        else:
+            Loss = import_class(self.arg.loss)
+            self.loss = Loss(**self.arg.loss_args)
+            
         self.print_log(f'Model total number of params: {count_params(self.model)}')
 
         if self.arg.weights:
             try:
-                self.global_step = int(arg.weights[:-3].split('-')[-1])
+                self.global_step = int(self.arg.weights[:-3].split('-')[-1])
             except:
                 print('Cannot parse global_step from model weights filename')
                 self.global_step = 0
@@ -326,6 +414,7 @@ class Processor():
                     self.print_log('  ' + d)
                 state.update(weights)
                 self.model.load_state_dict(state)
+        self.model.apply_freeze()
 
     def load_param_groups(self):
         """
@@ -392,15 +481,30 @@ class Processor():
                 shuffle=True,
                 num_workers=self.arg.num_worker,
                 drop_last=True,
-                worker_init_fn=worker_seed_fn)
+                worker_init_fn=worker_seed_fn,
+                collate_fn=custom_collate,
+                pin_memory=True)
+        if self.arg.phase in ["test", "train"]:
+            self.data_loader['test'] = torch.utils.data.DataLoader(
+                dataset=Feeder(**self.arg.test_feeder_args, test=True),
+                batch_size=self.arg.test_batch_size,
+                shuffle=False,
+                num_workers=self.arg.num_worker,
+                drop_last=False,
+                worker_init_fn=worker_seed_fn,
+                collate_fn=custom_collate,
+                pin_memory=True)
 
-        self.data_loader['test'] = torch.utils.data.DataLoader(
-            dataset=Feeder(**self.arg.test_feeder_args),
-            batch_size=self.arg.test_batch_size,
-            shuffle=False,
-            num_workers=self.arg.num_worker,
-            drop_last=False,
-            worker_init_fn=worker_seed_fn)
+        if self.arg.phase == "extract":
+            self.data_loader['extract'] = torch.utils.data.DataLoader(
+                dataset=Feeder(**self.arg.test_feeder_args, test=True, extract=True),
+                batch_size=1,
+                shuffle=False,
+                num_workers=self.arg.num_worker,
+                drop_last=False,
+                worker_init_fn=worker_seed_fn,
+                collate_fn=custom_collate,
+                pin_memory=True)
 
     def save_arg(self):
         # save arg
@@ -471,11 +575,12 @@ class Processor():
 
         process = tqdm(loader, dynamic_ncols=True)
         for batch_idx, (data, label, index) in enumerate(process):
+
             self.global_step += 1
             # get data
             with torch.no_grad():
                 data = data.float().cuda(self.output_device)
-                label = label.long().cuda(self.output_device)
+                label = label.long().cuda(self.output_device, non_blocking=True)
             timer['dataloader'] += self.split_time()
 
             # backward
@@ -520,6 +625,10 @@ class Processor():
                 self.train_writer.add_scalar('acc', acc, self.global_step)
                 self.train_writer.add_scalar('loss', loss.item() * splits, self.global_step)
                 self.train_writer.add_scalar('loss_l1', l1, self.global_step)
+                wandb.log({ "loss": loss,
+                            "acc": acc,
+                            "loss_l1": l1,
+                })
 
             #####################################
 
@@ -535,6 +644,7 @@ class Processor():
             # https://discuss.pytorch.org/t/gpu-memory-consumption-increases-while-training/2770/3
             del output
             del loss
+
 
         # statistics of time consumption and loss
         proportion = {
@@ -584,6 +694,10 @@ class Processor():
                     else:
                         l1 = 0
                     loss = self.loss(output, label)
+                    #import pickle  # TODO remove
+                    #print(f"max{output.argmax(dim=1)}")
+                    #with open("/vol/research/SignRecognition/swisstxt/logits.pkl", "wb") as f:
+                    #    f.write(pickle.dumps([data, output, label]))
                     score_batches.append(output.data.cpu().numpy())
                     loss_values.append(loss.item())
 
@@ -611,6 +725,9 @@ class Processor():
                 self.val_writer.add_scalar('loss', loss, self.global_step)
                 self.val_writer.add_scalar('loss_l1', l1, self.global_step)
                 self.val_writer.add_scalar('acc', accuracy, self.global_step)
+                wandb.log({"dev_loss": loss,
+                           "dev_acc": accuracy,
+                           "dev_loss_l1": l1})
 
             score_dict = dict(zip(self.data_loader[ln].dataset.sample_name, score))
             self.print_log(f'\tMean {ln} loss of {len(self.data_loader[ln])} batches: {np.mean(loss_values)}.')
@@ -623,6 +740,37 @@ class Processor():
 
         # Empty cache after evaluation
         torch.cuda.empty_cache()
+
+    def extract(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
+        if wrong_file is not None:
+            f_w = open(wrong_file, 'w')
+        if result_file is not None:
+            f_r = open(result_file, 'w')
+        with torch.no_grad():
+            self.model = self.model.cuda(self.output_device)
+            self.model.eval()
+            self.print_log(f'Eval epoch: {epoch + 1}')
+            for ln in loader_name:
+                loss_values = []
+                score_batches = []
+                step = 0
+                process = tqdm(self.data_loader[ln], dynamic_ncols=True)
+                for batch_idx, (data, label, index) in enumerate(process):
+                    data = data.float().cuda(self.output_device)
+                    label = label.long().cuda(self.output_device)
+                    output = self.model(data, )
+                    if isinstance(output, tuple):
+                        output, l1 = output
+                        l1 = l1.mean()
+                    else:
+                        l1 = 0
+
+
+
+
+        # Empty cache after evaluation
+        torch.cuda.empty_cache()
+
 
     def start(self):
         if self.arg.phase == 'train':
@@ -666,6 +814,8 @@ class Processor():
             )
 
             self.print_log('Done.\n')
+        else:
+            print(f"Not in train or test mode: ({self.arg.phase})")
 
 
 def str2bool(v):
@@ -678,6 +828,7 @@ def str2bool(v):
 
 
 def main():
+    os.chdir("/vol/research/SignRecognition/MS-G3D")
     parser = get_parser()
 
     # load arg form config file
@@ -693,6 +844,9 @@ def main():
         parser.set_defaults(**default_arg)
 
     arg = parser.parse_args()
+    print("<------------------------------>")
+    print(arg.__dict__)
+    print("<------------------------------>")
     init_seed(arg.seed)
     processor = Processor(arg)
     processor.start()

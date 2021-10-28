@@ -1,0 +1,28 @@
+# ----------------------------------------------------------------------------------------------------------------------
+executable = /envs/msg3d/bin/python3
+arguments = $(script)
+# ----------------------------------------------------------------------------------------------------------------------
+universe         = docker
+docker_image     =  joedinn/msg3d:5
+should_transfer_files = YES
+environment = mount=/vol/research/SignRecognition,/vol/research/SignTranslation,/vol/research/extol,/vol/vssp/datasets/singlevideo/phoenix-2014
+# ----------------------------------------------------------------------------------------------------------------------
+requirements = (HasDocker == true) && \
+               (HasStornext == true) && \
+               (CUDACapability>=5.0) && \
+		(CUDAGlobalMemoryMb > 15000)
+               #(machine != "gloin.eps.surrey.ac.uk") && \
+               #(CUDACapability>=5.0)
+               # && \
+               # (NotProjectOwned == True)
+# ----------------------------------------------------------------------------------------------------------------------
+request_GPUs     = 1
+request_CPUs     = 1
+request_memory   = 50G
+request_disk     = 10G
++GPUMem          = 15000
++CanCheckpoint   = False
++JobRunTime      = 24
+# ----------------------------------------------------------------------------------------------------------------------
+stream_output = True
+# ----------------------------------------------------------------------------------------------------------------------

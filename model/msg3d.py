@@ -1,6 +1,8 @@
 import sys
 sys.path.insert(0, '')
 
+import pickle
+
 import math
 import numpy as np
 import torch
@@ -110,11 +112,18 @@ class Model(nn.Module):
                  num_gcn_scales,
                  num_g3d_scales,
                  graph,
-                 in_channels=3):
+                 body_type="SMPLH",
+                 type="holistic",
+                 in_channels=3,
+                 finetune=False,
+                 ft_num_class=None,
+                 check_extract=False,
+                 ):
         super(Model, self).__init__()
-
+        self.check_extract = check_extract
+        self.finetune = finetune
         Graph = import_class(graph)
-        A_binary = Graph().A_binary
+        A_binary = Graph(num_node=num_point, body_type=body_type, type=type).A_binary
 
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
 
@@ -149,22 +158,34 @@ class Model(nn.Module):
         self.tcn3 = MS_TCN(c3, c3)
 
         self.fc = nn.Linear(c3, num_class)
+        if self.finetune:
+            self.ft_fc = nn.Linear(c3, num_class if ft_num_class is None else ft_num_class)
 
-    def forward(self, x):
-        N, C, T, V, M = x.size()
-        x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
-        x = self.data_bn(x)
-        x = x.view(N * M, V, C, T).permute(0,2,3,1).contiguous()
 
-        # Apply activation to the sum of the pathways
-        x = F.relu(self.sgcn1(x) + self.gcn3d1(x), inplace=True)
-        x = self.tcn1(x)
+    def forward(self, x, extract=False):
+        if not self.check_extract: # Used to check if the extracted features are correct
 
-        x = F.relu(self.sgcn2(x) + self.gcn3d2(x), inplace=True)
-        x = self.tcn2(x)
+            training = self.training
+            if training and self.finetune:
+                self.eval()
+                self.ft_fc.train()
 
-        x = F.relu(self.sgcn3(x) + self.gcn3d3(x), inplace=True)
-        x = self.tcn3(x)
+            N, C, T, V, M = x.size()
+
+            x = x.permute(0, 4, 3, 1, 2).contiguous().view(N, M * V * C, T)
+            torch.backends.cudnn.enabled = False
+            x = self.data_bn(x)
+            torch.backends.cudnn.enabled = True
+            x = x.view(N * M, V, C, T).permute(0,2,3,1).contiguous()
+            # Apply activation to the sum of the pathways
+            x = F.relu(self.sgcn1(x) + self.gcn3d1(x), inplace=True)
+            x = self.tcn1(x)
+            x = F.relu(self.sgcn2(x) + self.gcn3d2(x), inplace=True)
+            x = self.tcn2(x)
+            x = F.relu(self.sgcn3(x) + self.gcn3d3(x), inplace=True)
+            x = self.tcn3(x)
+            if extract:
+                return x
 
         out = x
         out_channels = out.size(1)
@@ -172,9 +193,21 @@ class Model(nn.Module):
         out = out.mean(3)   # Global Average Pooling (Spatial+Temporal)
         out = out.mean(1)   # Average pool number of bodies in the sequence
 
-        out = self.fc(out)
+        if self.finetune:
+            out = self.ft_fc(out)
+        else:
+            out = self.fc(out)
+        if training:
+            self.train()
+
         return out
 
+    def apply_freeze(self):
+        if self.finetune:
+            for parameter in self.parameters():
+                parameter.requires_grad = False
+            for parameter in self.ft_fc.parameters():
+                parameter.requires_grad = True
 
 if __name__ == "__main__":
     # For debugging purposes
@@ -195,3 +228,15 @@ if __name__ == "__main__":
     model.forward(x)
 
     print('Model total # params:', count_params(model))
+
+
+#N batch size
+#M = Number of people
+#V = Number of points
+#C = Input channels
+#T = Number of timesteps
+
+#num_person * in_channels * num_point
+#M * V * C
+
+#[32, 56, 369]) N T V*C

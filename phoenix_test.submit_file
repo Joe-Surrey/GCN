@@ -1,0 +1,37 @@
+# ----------------------------------------------------------------------------------------------------------------------
+executable    = /vol/research/SignRecognition/anaconda3/envs/slt/bin/python3
+arguments = $(script)
+# ----------------------------------------------------------------------------------------------------------------------
+universe         = docker
+docker_image     = pytorch/pytorch:1.8.0-cuda11.1-cudnn8-devel
+JobBatchName    = msg3d
+should_transfer_files = YES
+environment = mount=/vol/research/SignRecognition,/vol/research/SignTranslation,/vol/research/extol,/vol/vssp/datasets/singlevideo/phoenix-2014
+# ----------------------------------------------------------------------------------------------------------------------
+log    = /vol/research/SignRecognition/swisstxt/logs/c$(cluster).p$(process).log
+output = /vol/research/SignRecognition/swisstxt/logs/c$(cluster).p$(process).out
+error  = /vol/research/SignRecognition/swisstxt/logs/c$(cluster).p$(process).error
+# ----------------------------------------------------------------------------------------------------------------------
+requirements = (HasDocker == true) && \
+               (HasStornext == true) && \
+               (CUDACapability>=5.0) && \
+		(CUDAGlobalMemoryMb > 15000)
+               #(machine != "gloin.eps.surrey.ac.uk") && \
+               #(CUDACapability>=5.0)
+               # && \
+               # (NotProjectOwned == True)
+# ----------------------------------------------------------------------------------------------------------------------
+request_GPUs     = 1
+request_CPUs     = 1
+request_memory   = 50G
+request_disk     = 10G
++GPUMem          = 15000
++CanCheckpoint   = False
++JobRunTime      = 24
+# ----------------------------------------------------------------------------------------------------------------------
+#priority = -1
+# ----------------------------------------------------------------------------------------------------------------------
+stream_output = True
+script = /vol/research/SignRecognition/MS-G3D/main.py --work-dir /vol/research/SignRecognition/MS-G3D/work_dirs/test --config ./config/phoenix_holistic_eps.yaml --weights /vol/research/SignRecognition/MS-G3D/work_dirs/phoenix_1000/weights/weights-51-574260.pt --phase test
+
+queue

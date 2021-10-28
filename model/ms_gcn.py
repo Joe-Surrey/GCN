@@ -20,7 +20,8 @@ class MultiScale_GraphConv(nn.Module):
                  disentangled_agg=True,
                  use_mask=True,
                  dropout=0,
-                 activation='relu'):
+                 activation='relu',
+                 ):
         super().__init__()
         self.num_scales = num_scales
 
@@ -41,13 +42,26 @@ class MultiScale_GraphConv(nn.Module):
 
         self.mlp = MLP(in_channels * num_scales, [out_channels], dropout=dropout, activation=activation)
 
+
+
     def forward(self, x):
         N, C, T, V = x.shape
         self.A_powers = self.A_powers.to(x.device)
         A = self.A_powers.to(x.dtype)
         if self.use_mask:
             A = A + self.A_res.to(x.dtype)
-        support = torch.einsum('vu,nctu->nctv', A, x)
+
+        try:  # TODO remove debugging
+            support = torch.einsum('vu,nctu->nctv', A, x)
+        except RuntimeError as e:
+            support = torch.einsum('vu,nctu->nctv', A.cpu(), x.cpu()).cuda()
+            raise e
+        #     import pickle
+        #     print(f"NaN: x: {torch.isnan(x).any()}, A: {torch.isnan(A).any()}")
+        #     with open("/vol/research/SignRecognition/swisstxt/A_x.pkl", "wb") as f:
+        #         f.write(pickle.dumps([A.cpu(), x.cpu()]))
+        #     raise e
+
         support = support.view(N, C, T, self.num_scales, V)
         support = support.permute(0,3,1,2,4).contiguous().view(N, self.num_scales*C, T, V)
         out = self.mlp(support)
@@ -59,4 +73,4 @@ if __name__ == "__main__":
     graph = AdjMatrixGraph()
     A_binary = graph.A_binary
     msgcn = MultiScale_GraphConv(num_scales=15, in_channels=3, out_channels=64, A_binary=A_binary)
-    msgcn.forward(torch.randn(16,3,30,25))
+    msgcn.forward(torch.randn(16, 3, 30, 25))

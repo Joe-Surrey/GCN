@@ -31,7 +31,15 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+/data
+/config
+/imgs
+/msg3d-pretrained-models
+*.zip
+*.submit_file
+/pretrained_models
+/wandb
+/work_dirs
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.

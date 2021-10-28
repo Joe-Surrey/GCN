@@ -40,7 +40,7 @@ def k_adjacency(A, k, with_self=False, self_factor=1):
 
 
 def normalize_adjacency_matrix(A):
-    node_degrees = A.sum(-1)
+    node_degrees = A.sum(-1) + 1e-10
     degs_inv_sqrt = np.power(node_degrees, -0.5)
     norm_degs_matrix = np.eye(len(node_degrees)) * degs_inv_sqrt
     return (norm_degs_matrix @ A @ norm_degs_matrix).astype(np.float32)

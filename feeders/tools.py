@@ -1,5 +1,5 @@
 import random
-
+from einops import repeat
 import numpy as np
 
 
@@ -31,6 +31,9 @@ def mean_subtractor(data_numpy, mean):
 
 def auto_pading(data_numpy, size, random_pad=False):
     C, T, V, M = data_numpy.shape
+    if T < size:
+        data_numpy = repeat(data_numpy, 'C T V M -> C (T R) V M', R=size//T)
+        C, T, V, M = data_numpy.shape
     if T < size:
         begin = random.randint(0, size - T) if random_pad else 0
         data_numpy_paded = np.zeros((C, size, V, M))
@@ -157,3 +160,4 @@ def openpose_match(data_numpy):
     data_numpy = data_numpy[:, :, :, rank]
 
     return data_numpy
+
